@@ -19,3 +19,4 @@ dirs = "2.0.2"
 lazy_static = "1.3.0"
 failure = { version = "0.1.5", default-features = false, features = [ "std" ] }
 regex = { version = "1.3.1", default-features = false, features = [ "std" ] }
+syntect = { version = "3.3.0", default-features = false, features = [ "parsing", "assets", "dump-load" ] }

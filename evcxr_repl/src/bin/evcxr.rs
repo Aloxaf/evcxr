@@ -17,10 +17,18 @@ use evcxr;
 
 use colored::*;
 use evcxr::{CommandContext, CompilationError, Error};
-use rustyline::{error::ReadlineError, Editor};
+use rustyline::completion::Completer;
+use rustyline::highlight::Highlighter;
+use rustyline::hint::{Hinter, HistoryHinter};
+use rustyline::{error::ReadlineError, Context, Editor, Helper};
+use std::borrow::Cow;
 use std::fs;
 use std::io;
 use std::sync::mpsc;
+use syntect::easy::HighlightLines;
+use syntect::highlighting::ThemeSet;
+use syntect::parsing::SyntaxSet;
+use syntect::util::as_24_bit_terminal_escaped;
 
 const PROMPT: &str = ">> ";
 
@@ -126,6 +134,66 @@ fn readline_direct(prompt: &str) -> rustyline::Result<String> {
     }
 }
 
+struct RustHighlighter {
+    ps: SyntaxSet,
+    ts: ThemeSet,
+}
+
+impl RustHighlighter {
+    fn new() -> RustHighlighter {
+        let ps = SyntaxSet::load_defaults_nonewlines();
+        let ts = ThemeSet::load_defaults();
+        RustHighlighter { ps, ts }
+    }
+
+    fn highlight(&self, line: &str, _pos: usize) -> String {
+        let syntax = self.ps.find_syntax_by_extension("rs").unwrap();
+        let theme = &self.ts.themes["Solarized (dark)"];
+        let mut h = HighlightLines::new(syntax, theme);
+        as_24_bit_terminal_escaped(&h.highlight(line, &self.ps), false)
+    }
+}
+
+struct RLHelper {
+    highlighter: RustHighlighter,
+    hinter: HistoryHinter,
+}
+
+impl RLHelper {
+    fn new() -> RLHelper {
+        RLHelper {
+            highlighter: RustHighlighter::new(),
+            hinter: HistoryHinter {},
+        }
+    }
+}
+
+impl Highlighter for RLHelper {
+    fn highlight<'l>(&self, line: &'l str, pos: usize) -> Cow<'l, str> {
+        Cow::Owned(self.highlighter.highlight(line, pos))
+    }
+
+    fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
+        Cow::Owned(hint.bright_black().to_string())
+    }
+
+    fn highlight_char(&self, _line: &str, _pos: usize) -> bool {
+        true
+    }
+}
+
+impl Hinter for RLHelper {
+    fn hint(&self, line: &str, pos: usize, ctx: &Context<'_>) -> Option<String> {
+        self.hinter.hint(line, pos, ctx)
+    }
+}
+
+impl Completer for RLHelper {
+    type Candidate = String;
+}
+
+impl Helper for RLHelper {}
+
 fn main() {
     evcxr::runtime_hook();
     println!("Welcome to evcxr. For help, type :help");
@@ -139,7 +207,8 @@ fn main() {
 
     let disable_readline = std::env::args().any(|x| x == "--disable-readline");
 
-    let mut editor = Editor::<()>::new();
+    let mut editor = Editor::new();
+    editor.set_helper(Some(RLHelper::new()));
     let mut opt_history_file = None;
     let config_dir = dirs::config_dir().map(|h| h.join("evcxr"));
     if let Some(config_dir) = &config_dir {
@@ -160,7 +229,10 @@ fn main() {
                 editor.add_history_entry(line.clone());
                 repl.execute(&line);
             }
-            Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => break,
+            Err(ReadlineError::Interrupted) => {
+                println!("CTRL-C");
+            }
+            Err(ReadlineError::Eof) => break,
             Err(err) => {
                 eprintln!("Error: {:?}", err);
                 break;
