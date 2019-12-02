@@ -29,6 +29,7 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect::util::as_24_bit_terminal_escaped;
+use syntect::dumps;
 
 const PROMPT: &str = ">> ";
 
@@ -141,13 +142,13 @@ struct RustHighlighter {
 
 impl RustHighlighter {
     fn new() -> RustHighlighter {
-        let ps = SyntaxSet::load_defaults_nonewlines();
-        let ts = ThemeSet::load_defaults();
+        let ps: SyntaxSet = dumps::from_binary(include_bytes!("../../assets/syntaxes.bin"));
+        let ts: ThemeSet = dumps::from_binary(include_bytes!("../../assets/themes.bin"));
         RustHighlighter { ps, ts }
     }
 
     fn highlight(&self, line: &str, _pos: usize) -> String {
-        let syntax = self.ps.find_syntax_by_extension("rs").unwrap();
+        let syntax = self.ps.find_syntax_by_name("Rust").unwrap();
         let theme = &self.ts.themes["Solarized (dark)"];
         let mut h = HighlightLines::new(syntax, theme);
         as_24_bit_terminal_escaped(&h.highlight(line, &self.ps), false)
