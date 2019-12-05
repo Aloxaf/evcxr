@@ -274,10 +274,9 @@ fn crate_deps() {
 #[ignore]
 fn crate_name_with_hyphens() {
     let (mut e, _) = new_command_context_and_outputs();
-    let crate1 = TmpCrate::new("crate-name-with-hyphens",
-    "pub fn r42() -> i32 {42}").unwrap();
-    let to_run =
-        crate1.dep_command() + "\nextern crate crate_name_with_hyphens;\ncrate_name_with_hyphens::r42()";
+    let crate1 = TmpCrate::new("crate-name-with-hyphens", "pub fn r42() -> i32 {42}").unwrap();
+    let to_run = crate1.dep_command()
+        + "\nextern crate crate_name_with_hyphens;\ncrate_name_with_hyphens::r42()";
     let outputs = e.execute(&to_run).unwrap();
     assert_eq!(outputs.content_by_mime_type, text_plain("42"));
 }
@@ -438,6 +437,13 @@ fn variable_assignment_compile_fail_then_use_statement() {
     assert!(e.eval(stringify!(let v = foo();)).is_err());
     eval!(e, use std::collections::HashMap;);
     assert_eq!(eval!(e, 42), text_plain("42"));
+}
+
+#[test]
+fn int_array() {
+    let mut e = new_context();
+    eval!(e, let v = [42; 5];);
+    eval!(e, assert_eq!(v[4], 42));
 }
 
 // Make sure that a type name containing a reserved word (e.g. async) doesn't
