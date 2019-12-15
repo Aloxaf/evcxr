@@ -19,17 +19,19 @@ use evcxr::{CommandContext, CompilationError, Error};
 use rustyline::completion::Completer;
 use rustyline::highlight::Highlighter;
 use rustyline::hint::{Hinter, HistoryHinter};
+use rustyline::line_buffer::LineBuffer;
+use rustyline::validate::{ValidationResult, Validator};
 use rustyline::{error::ReadlineError, Context, Editor, Helper};
 use std::borrow::Cow;
 use std::fs;
 use std::io;
 use std::sync::mpsc;
+use structopt::StructOpt;
+use syntect::dumps;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect::util::as_24_bit_terminal_escaped;
-use syntect::dumps;
-use structopt::StructOpt;
 
 const PROMPT: &str = ">> ";
 
@@ -209,6 +211,17 @@ impl Completer for RLHelper {
 }
 
 impl Helper for RLHelper {}
+
+impl Validator for RLHelper {
+    fn validate(&self, line: &mut LineBuffer) -> ValidationResult {
+        let code = format!("fn evcxr() {{ {} }}", line.as_str());
+        if line.starts_with(':') || syn::parse_str::<syn::Stmt>(&code).is_ok() {
+            ValidationResult::Valid(None)
+        } else {
+            ValidationResult::Incomplete
+        }
+    }
+}
 
 #[derive(StructOpt, Debug)]
 #[structopt(name = "evcxr")]
