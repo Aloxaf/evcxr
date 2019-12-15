@@ -17,7 +17,6 @@ use crate::code_block::{CodeBlock, CodeOrigin};
 use crate::crate_config::ExternalCrate;
 use crate::errors::{CompilationError, Error};
 use crate::evcxr_internal_runtime;
-use crate::idents;
 use crate::item;
 use crate::module::{Module, SoFile};
 use crate::runtime;
@@ -37,6 +36,7 @@ pub struct EvalContext {
     build_num: i32,
     pub(crate) debug_mode: bool,
     opt_level: String,
+    output_format: String,
     module: Module,
     state: ContextState,
     committed_state: ContextState,
@@ -125,11 +125,12 @@ impl EvalContext {
         let (stdout_sender, stdout_receiver) = mpsc::channel();
         let (stderr_sender, stderr_receiver) = mpsc::channel();
         let child_process = ChildProcess::new(subprocess_command, stderr_sender)?;
-        let context = EvalContext {
+        let mut context = EvalContext {
             _tmpdir: opt_tmpdir,
             build_num: 0,
             debug_mode: false,
             opt_level: "2".to_owned(),
+            output_format: "{:?}".to_owned(),
             state: ContextState::default(),
             committed_state: ContextState::default(),
             module,
@@ -142,6 +143,9 @@ impl EvalContext {
             stdout: stdout_receiver,
             stderr: stderr_receiver,
         };
+        if context.linker() == "lld" && context.eval("42").is_err() {
+            context.set_linker("system".to_owned());
+        }
         Ok((context, outputs))
     }
 
@@ -185,9 +189,7 @@ impl EvalContext {
                 }
                 match &stmt {
                     syn::Stmt::Local(local) => {
-                        for pat in &local.pats {
-                            self.record_new_locals(pat, local.ty.as_ref().map(|ty| &*ty.1));
-                        }
+                        self.record_new_locals(&local.pat, None);
                         code_block = code_block.user_code(stmt_code);
                     }
                     syn::Stmt::Item(syn::Item::ExternCrate(syn::ItemExternCrate {
@@ -247,7 +249,10 @@ impl EvalContext {
                             // If that fails, we try debug format.
                             CodeBlock::new()
                                 .generated(SEND_TEXT_PLAIN_DEF)
-                                .generated("evcxr_send_text_plain(&format!(\"{:?}\",\n")
+                                .generated(&format!(
+                                    "evcxr_send_text_plain(&format!(\"{}\",\n",
+                                    self.output_format
+                                ))
                                 .user_code(stmt_code)
                                 .generated("));"),
                         );
@@ -302,6 +307,13 @@ impl EvalContext {
         self.opt_level = level.to_owned();
         Ok(())
     }
+    pub fn output_format(&self) -> &str {
+        &self.output_format
+    }
+
+    pub fn set_output_format(&mut self, output_format: String) {
+        self.output_format = output_format;
+    }
 
     pub fn set_sccache(&mut self, enabled: bool) -> Result<(), Error> {
         self.module.set_sccache(enabled)
@@ -309,6 +321,14 @@ impl EvalContext {
 
     pub fn sccache(&self) -> bool {
         self.module.sccache()
+    }
+
+    pub fn set_linker(&mut self, linker: String) {
+        self.module.linker = linker;
+    }
+
+    pub fn linker(&self) -> &str {
+        &self.module.linker
     }
 
     // TODO: Remove this function and just use add_dep().
@@ -535,7 +555,7 @@ impl EvalContext {
                 .add_all(self.check_variable_statements())
                 .add_all(self.load_variable_statements());
         } else {
-            code = code.generated(") {");
+            code = code.generated("evcxr_variable_store: *mut u8) -> *mut u8 {");
         }
         if compilation_mode == CompilationMode::RunAndCatchPanics {
             if needs_variable_store {
@@ -587,6 +607,8 @@ impl EvalContext {
                         self.store_variable_statements(&VariableMoveState::CopiedIntoCatchUnwind),
                     );
             }
+            code = code.generated("evcxr_variable_store");
+        } else {
             code = code.generated("evcxr_variable_store");
         }
         code.generated("}")
@@ -776,7 +798,32 @@ impl EvalContext {
         Ok(())
     }
 
-    fn record_new_locals(&mut self, pat: &syn::Pat, ty: Option<&syn::Type>) {
+    fn record_new_locals(&mut self, pat: &syn::Pat, opt_ty: Option<&syn::Type>) {
+        match pat {
+            syn::Pat::Ident(ident) => self.record_local(ident, opt_ty),
+            syn::Pat::Type(pat_type) => self.record_new_locals(&*pat_type.pat, Some(&*pat_type.ty)),
+            syn::Pat::Struct(ref pat_struct) => {
+                for field in &pat_struct.fields {
+                    self.record_new_locals(&field.pat, None);
+                }
+            }
+            syn::Pat::Tuple(ref pat_tuple) => {
+                for member in &pat_tuple.elems {
+                    self.record_new_locals(member, None);
+                }
+            }
+            syn::Pat::TupleStruct(ref pat_tuple) => {
+                for member in &pat_tuple.pat.elems {
+                    self.record_new_locals(member, None);
+                }
+            }
+            x => {
+                println!("Unhandled pat kind: {:?}", x);
+            }
+        }
+    }
+
+    fn record_local(&mut self, pat_ident: &syn::PatIdent, opt_ty: Option<&syn::Type>) {
         use syn::export::ToTokens;
         // Default new variables to some type, say String. Assuming it isn't a
         // String, we'll get a compilation error when we try to move the
@@ -785,24 +832,23 @@ impl EvalContext {
         // type, we'll use that for all variables in that assignment (probably
         // only correct if it's a single variable). This gives the user a way to
         // force the type if rustc is giving us a bad suggestion.
-        let type_name = ty
-            .map(|ty| format!("{}", ty.into_token_stream()))
-            .unwrap_or_else(|| "String".to_owned());
-        idents::idents_do(pat, &mut |pat_ident: &syn::PatIdent| {
-            self.state.variable_states.insert(
-                pat_ident.ident.to_string(),
-                VariableState {
-                    type_name: type_name.clone(),
-                    is_mut: pat_ident.mutability.is_some(),
-                    // All new locals will initially be defined only inside our catch_unwind
-                    // block.
-                    move_state: VariableMoveState::MovedIntoCatchUnwind,
-                    // If we're preserving copy types, then assume this variable
-                    // is copy until we find out it's not.
-                    is_copy_type: self.preserve_vars_on_panic,
-                },
-            );
-        });
+        let type_name = match opt_ty {
+            Some(ty) if type_is_fully_specified(ty) => format!("{}", ty.into_token_stream()),
+            _ => "String".to_owned(),
+        };
+        self.state.variable_states.insert(
+            pat_ident.ident.to_string(),
+            VariableState {
+                type_name,
+                is_mut: pat_ident.mutability.is_some(),
+                // All new locals will initially be defined only inside our catch_unwind
+                // block.
+                move_state: VariableMoveState::MovedIntoCatchUnwind,
+                // If we're preserving copy types, then assume this variable
+                // is copy until we find out it's not.
+                is_copy_type: self.preserve_vars_on_panic,
+            },
+        );
     }
 
     fn store_variable_statements(&mut self, move_state: &VariableMoveState) -> CodeBlock {
@@ -864,6 +910,25 @@ impl EvalContext {
         }
         extern_stmts.add_all(use_stmts)
     }
+}
+
+/// Returns whether a type is fully specified. i.e. it doesn't contain any '_'.
+fn type_is_fully_specified(ty: &syn::Type) -> bool {
+    struct InferenceFinder {
+        has_inference: bool,
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for InferenceFinder {
+        fn visit_type_infer(&mut self, _i: &'ast syn::TypeInfer) {
+            self.has_inference = true;
+        }
+    }
+
+    let mut inference_finder = InferenceFinder {
+        has_inference: false,
+    };
+    syn::visit::visit_type(&mut inference_finder, ty);
+    !inference_finder.has_inference
 }
 
 #[derive(Debug)]
